@@ -40,6 +40,8 @@ def main():
             answer = answer.lower()[0]
             if answer == 'y':
                 vapid.save_public_key('public_key.pem')
+    import pdb; pdb.set_trace()
+    print vapid.private_key.to_der()
     claim_file = args.sign
     if claim_file:
         if not os.path.exists(claim_file):
