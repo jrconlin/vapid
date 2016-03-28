@@ -1,10 +1,5 @@
-/*
- * This is a JavaScript Scratchpad.
+/* Javascript VAPID library.
  *
- * Enter some JavaScript, then Right Click or choose from the Execute Menu:
- * 1. Run to evaluate the selected text (Ctrl+R),
- * 2. Inspect to bring up an Object Inspector on the result (Ctrl+I), or,
- * 3. Display to insert the result in a comment after the selection. (Ctrl+L)
  */
 
 'use strict';
@@ -12,17 +7,24 @@
 var webCrypto = window.crypto.subtle;
 
 function ord(c){
+    /* return an ordinal for a character */
     return c.charCodeAt(0);
 }
 
 function chr(c){
+    /* return a character for a given ordinal */
     return String.fromCharCode(c);
 }
 
 var vapid = {
+    /* Generate and verify a VAPID token */
+
     _private_key:  "",
     _public_key: "",
+
     generate_keys: function() {
+       /* Generate the public and private keys
+        */
        webCrypto.generateKey(
           {name: "ECDSA", namedCurve: "P-256"},
           true,
@@ -38,18 +40,48 @@ var vapid = {
     },
 
     url_btoa: function(data) {
-        return btoa(data)
-            .replace(/\+/g, "-")
-            .replace(/\//g, "_");
+        /* Convert a binary array into a URL safe base64 string */
+        if (data instanceof ArrayBuffer || data instanceof Uint8Array){
+            data = String.fromCharCode.apply(null, new Uint8Array(data))
+        }
+        let reply = btoa(data).replace(/\+/g, "-").replace(/\//g, "_");
+        console.debug("btoa", data, reply);
+        return reply
     },
 
     url_atob: function(data) {
-        return atob(data
-            .replace(/\-/g, "+")
-            .replace(/_/g, "/"));
+        /* return a binary array from a URL safe base64 string */
+        let reply = this._str_to_array(atob(data
+                                       .replace(/\-/g, "+")
+                                       .replace(/\_/g, "/")));
+        console.debug("atob", data, reply, this.url_btoa(reply));
+        return reply
     },
 
+    _str_to_array: function(str) {
+        /* convert a string into a ByteArray
+         *
+         * TextEncoders would be faster, but have a habit of altering
+         * byte order
+         */
+        let split = str.split("");
+        let reply = new Uint8Array(split.length);
+        for (let i in split) {
+            reply[i] = String.charCodeAt(split[i]);
+        }
+        return reply;
+    },
+
+    /* A fully featured DER library is available at
+     * https://github.com/indutny/asn1.js
+     */
+
     export_private_der: function() {
+        /* Generate a DER sequence. This can be read in via
+         * something like python's
+         * ecdsa.keys.SigningKey
+         *     .from_der(base64.urlsafe_b64decode("MHc..."))
+         */
         return webCrypto.exportKey("jwk", this._private_key)
             .then(k => {
                 // verifying key
@@ -73,27 +105,25 @@ var vapid = {
                 let vk_enc = '\x03' + chr(vk.length) + vk;
                 let vk_const = '\xa1' + chr(vk_enc.length) + vk_enc;
                 // \x30 is a sequence start.
-                let seq = int1 + dvstr + curve_oid + vk_const;
-                console.debug("Sequence:", seq.length, seq);
+                let seq = int1 + dvstr + curve_oid_const + vk_const;
                 let rder = "\x30" + chr(seq.length) + seq;
-                return btoa(rder);
+                return this.url_btoa(rder);
             })
-        .catch(err => console.error(err))
+            .catch(err => console.error(err))
     },
 
     export_public_der: function () {
-        return webCrypto.exportKey("raw", this._public_key)
+        /* Generate a DER sequence containing the public key info */
+        return webCrypto.exportKey("jwk", this._public_key)
             .then(k => {
                 // raw keys always begin with a 4
-                let xv = new Uint8Array(k.slice(1, 33));
-                let yv = new Uint8Array(k.slice(33));
+                let xv = this.url_atob(k.x);
+                let yv = this.url_atob(k.y);
 
-                let xs = "";
-                for (let i of xv) {xs += String.fromCharCode(i)};
-
-                let ys = "";
-                for (let i of yv) {ys += String.fromCharCode(i)};
-                let point = "\x00\x04" + xs + ys;
+                let point = "\x00\x04" +
+                    String.fromCharCode.apply(null, xv) +
+                    String.fromCharCode.apply(null, yv);
+                window.Kpoint = point;
                 // a combination of the oid_ecPublicKey + p256 encoded oid
                 let prefix = "\x30\x13" +  // sequence + length
                     "\x06\x07" + "\x2a\x86\x48\xce\x3d\x02\x01" +
@@ -101,12 +131,59 @@ var vapid = {
                 let encPoint = "\x03" + chr(point.length) + point
                 let rder = "\x30" + chr(prefix.length + encPoint.length) +
                     prefix + encPoint;
-                let der = btoa(rder);
+                let der = this.url_btoa(rder);
                 return der;
             });
     },
 
+    import_public_der: function(derArray) {
+        /* Import a DER formatted public key string.
+         *
+         * The Crypto-Key p256ecdsa=... key is such a thing.
+         * Returns a promise containing the public key.
+         */
+        if (typeof(derArray) == "string") {
+            derArray = this.url_atob(derArray);
+        }
+        /* Super light weight public key import function */
+        let err = new Error("Invalid Public Key record. Please use a valid DER Formatted record.");
+        // Does the record begin with "\x30"
+        if (derArray[0] != 48) { throw err}
+        // is this an ECDSA record? (looking for \x2a and \x86
+        if (derArray[6] != 42 && derArray[7] != 134) { throw err}
+        if (derArray[15] != 42 && derArray[16] != 134) { throw err}
+        // Public Key Record usually beings @ offset 23.
+        if (derArray[23] != 3 && derArray[24] != 40 &&
+                derArray[25] != 0 && derArray[26] != 4) {
+            throw err;
+        }
+        // pubkey offset starts at byte 25
+        let x = btoa(String.fromCharCode.apply(null, derArray.slice(27, 27+32)))
+            .replace(/\+/g, "-").replace(/\//g, "_");
+        let y = btoa(String.fromCharCode.apply(null, derArray.slice(27+32, 27+64)))
+            .replace(/\+/g, "-").replace(/\//g, "_");
+
+        // Convert to a JWK and import it.
+        let jwk = {
+            crv: "P-256",
+            ext: true,
+            key_ops: ["verify"],
+            kty: "EC",
+            x: x,
+            y, y
+        };
+
+        return webCrypto.importKey('jwk', jwk, 'ECDSA', true, ["verify"])
+
+    },
+
+
     sign: function(claims) {
+        /* Sign a claims object and return the headers that can be used to decrypt the string.
+         *
+         * Returns a promise containing an object identifying the headers and values to include
+         * to specify VAPID auth.
+        */
         if (this._public_key == "") {
             throw new Error("No keys defined. Please use generate_keys() or load a public key.");
         }
@@ -118,20 +195,22 @@ var vapid = {
                 throw new Error("Claim missing ", key);
             }
         })
+        let alg = {name:"ECDSA", namedCurve: "P-256", hash:{name:"SHA-256"}};
         let headStr = JSON.stringify({typ:"JWT",alg:"ES256"});
         let claimStr = JSON.stringify(claims);
-        let encoder = new TextEncoder("utf-8");
         let content = this.url_btoa(headStr) + "." + this.url_btoa(claimStr);
-        let signatory = encoder.encode(content);
+        let signatory = this._str_to_array(content);
+        console.debug(signatory);
         return webCrypto.sign(
-            {name:"ECDSA", hash:{name:"SHA-256"}},
+            alg,
             this._private_key,
             signatory)
-            .then(sign => {
-                return this.public_der()
+            .then(signature => {
+                let sig = this.url_btoa(signature);
+                return this.export_public_der()
                     .then( der => {
                         return {
-                            authorization: "Bearer " + content + "." + this.url_btoa(sign),
+                            authorization: "Bearer " + content + "." + sig,
                             "crypto-key": "p256ecdsa=" + der,
                         }
                     })
@@ -141,22 +220,49 @@ var vapid = {
             })
     },
 
-    verify: function(token) {
-        if (this._private_key == "") {
+    verify: function(token, public_key=null) {
+        /* Verify a VAPID token.
+         *
+         * Token is the Authorization Header, Public Key is the Crypto-Key header.
+        */
+
+        // Ideally, just the bearer token, Cheat a little to be nice to the dev.
+        if (token.search("earer ") > -1) {
+            token = token.split(" ")[1];
+        }
+
+        // Again, ideally, just the p256ecdsa token.
+        if (public_key != null) {
+
+            if (public_key.search('p256ecdsa') > -1) {
+                let sc = /p256ecdsa=([^;,]+)/i;
+                public_key = sc.exec(public_key)[1];
+            }
+
+            // If there's no public key already defined, load the public_key
+            // and try again.
+            return this.import_public_der(public_key)
+                .then(key => {return this.verify(token)});
+        }
+        if (this._public_key == "") {
             throw new Error("No keys defined. Please use generate_keys() or load a private key.");
         }
+
+        let alg = { name: "ECDSA", namedCurve: "P-256", hash: "SHA-256" };
         let items = token.split('.');
-        let signature = items[2];
-        let encoder = new TextEncoder("utf-8");
-        let signatory = encoder.encode(items.splice(0,2).join('.'));
+        let signature = this.url_atob(items[2]);
+        let content = items.slice(0,2).join('.');
+        let signatory = this._str_to_array(content);
+        console.debug(signatory);
         return webCrypto.verify(
-            {name:"ECDSA", hash:{name:"SHA-256"}},
-            this.pubic_key,
-            signatory,
-            this.url_atob(signature))
+            alg,
+            this._public_key,
+            signature,
+            signatory)
            .then(valid => {
                if (valid) {
-                   return JSON.parse(this.url_btoa(items[1]))
+                   return JSON.parse(String.fromCharCode
+                                        .apply(null, this.url_atob(items[1])))
                }
                return {}
            })
