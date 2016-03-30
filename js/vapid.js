@@ -25,17 +25,17 @@ var vapid = {
     generate_keys: function() {
        /* Generate the public and private keys
         */
-       webCrypto.generateKey(
+       return webCrypto.generateKey(
           {name: "ECDSA", namedCurve: "P-256"},
           true,
           ["sign", "verify"])
            .then(keys => {
               this._private_key = keys.privateKey;
               this._public_key = keys.publicKey;
-              console.info("Keys defined.");
+              console.info("VAPID Keys defined.");
            })
            .catch(fail => {
-               console.error("generate keys", fail);
+               console.error("VAPID generate keys error:", fail);
                });
     },
 
@@ -45,7 +45,6 @@ var vapid = {
             data = String.fromCharCode.apply(null, new Uint8Array(data))
         }
         let reply = btoa(data).replace(/\+/g, "-").replace(/\//g, "_");
-        console.debug("btoa", data, reply);
         return reply
     },
 
@@ -54,7 +53,6 @@ var vapid = {
         let reply = this._str_to_array(atob(data
                                        .replace(/\-/g, "+")
                                        .replace(/\_/g, "/")));
-        console.debug("atob", data, reply, this.url_btoa(reply));
         return reply
     },
 
@@ -200,18 +198,23 @@ var vapid = {
         let claimStr = JSON.stringify(claims);
         let content = this.url_btoa(headStr) + "." + this.url_btoa(claimStr);
         let signatory = this._str_to_array(content);
-        console.debug(signatory);
         return webCrypto.sign(
             alg,
             this._private_key,
             signatory)
             .then(signature => {
                 let sig = this.url_btoa(signature);
-                return this.export_public_der()
-                    .then( der => {
+                /* The headers consist of the constructed JWT as the "authorization"
+                 * and the raw Public key as the p256ecdsa element of "Crypto-Key"
+                 * Note that Crypto-Key can contain many elements, separated by a ","
+                 * You may need to append this value to an existing "Crypto-Key"
+                 * header value.
+                 */
+                return webCrypto.exportKey('raw', this._public_key)
+                    .then( key => {
                         return {
                             authorization: "Bearer " + content + "." + sig,
-                            "crypto-key": "p256ecdsa=" + der,
+                            "crypto-key": "p256ecdsa=" + this.url_btoa(key),
                         }
                     })
             })
@@ -253,7 +256,6 @@ var vapid = {
         let signature = this.url_atob(items[2]);
         let content = items.slice(0,2).join('.');
         let signatory = this._str_to_array(content);
-        console.debug(signatory);
         return webCrypto.verify(
             alg,
             this._public_key,
