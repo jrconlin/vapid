@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import os
 import json
 import unittest
@@ -91,7 +92,9 @@ class VapidTestCase(unittest.TestCase):
         v = Vapid("/tmp/private")
         msg = "foobar"
         vtoken = v.validate(msg)
-        ok_(v.public_key.verify(base64.urlsafe_b64decode(vtoken), msg))
+        ok_(v.public_key.verify(base64.urlsafe_b64decode(vtoken),
+                                msg,
+                                hashfunc=hashlib.sha256))
 
     def test_sign(self):
         v = Vapid("/tmp/private")
