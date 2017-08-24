@@ -1,6 +1,7 @@
 extern crate base64;
 extern crate openssl;
 extern crate serde_json;
+extern crate time;
 
 use openssl::bn::BigNum;
 use openssl::bn::BigNumContext;
@@ -107,17 +108,31 @@ pub fn generate_keys() -> Key {
     Key::generate()
 }
 
-pub fn sign(key: Key, claims: HashMap<String, String>) -> String {
+pub fn sign(key: Key, claims: &mut HashMap<String, serde_json::Value>) -> String {
     // convert the hash to a normalized JSON string
     // TODO: check and auto-fill claims
     let mut ctx = BigNumContext::new().unwrap();
-    let prefix:String = String::from("{\"typ\":\"JWT\",\"alg\":\"ES256\"}");
+    let prefix = String::from("{\"typ\":\"JWT\",\"alg\":\"ES256\"}");
+    if !claims.contains_key(&String::from("sub")) {
+        panic!("No \"sub\" found in claims");
+    }
+    claims.entry(String::from("exp"))
+        .or_insert(serde_json::Value::from(
+            (time::now_utc() + time::Duration::hours(23)).to_timespec().sec));
     let json:String = serde_json::to_string(&claims).unwrap();
     let content = format!("{}.{}",
         base64::encode_config(&prefix, base64::URL_SAFE_NO_PAD),
         base64::encode_config(&json, base64::URL_SAFE_NO_PAD)
     );
-    // TODO: Fix ownership issues with key.key
+    let auth_k = base64::encode_config(
+        unsafe {
+            &String::from_utf8_unchecked(key.key.public_key().unwrap().to_bytes(
+                &Key::group(),
+                ec::POINT_CONVERSION_COMPRESSED,
+                &mut ctx).unwrap())
+         },
+        base64::URL_SAFE_NO_PAD,
+    );
     let pub_key = &pkey::PKey::from_ec_key(key.key).unwrap();
 
     let mut signer = Signer::new(
@@ -133,20 +148,41 @@ pub fn sign(key: Key, claims: HashMap<String, String>) -> String {
                              unsafe{ &String::from_utf8_unchecked(signature) },
                              base64::URL_SAFE_NO_PAD
                          ));
-    let auth_k = base64::encode_config(
-        unsafe {
-            &String::from_utf8_unchecked(key.key.public_key().unwrap().to_bytes(
-                &Key::group(),
-                ec::POINT_CONVERSION_COMPRESSED,
-                &mut ctx).unwrap())
-         },
-        base64::URL_SAFE_NO_PAD,
-    );
 
     format!("Authorization: {} t={},k={}", SCHEMA, auth_t, auth_k)
 }
 
-pub fn verify(key: Key, validation_token: String, verification_token:String) -> bool {
-    //Verify that the validation token string matches for the verification token string
+fn parse_auth_token(auth_token: &mut String) -> HashMap<String, String> {
+    let parts = auth_token.splitn(2,' ');
+    // Arrays, how do they work?
+    if parts[0] == "Authorization:" {
+        parts.pop()
+    }
+    if parts[0] != SCHEMA {
+        panic!(format!("Expected schema {} got {}", SCHEMA, parts[0]))
+    }
+    parts.pop();
+    // TODO: parse the remaining parts back into t & k values
+    let reply = HashMap::new();
+
+    reply.insert(String::from("t"), String::from("t-val"));
+    reply.insert(String::from("k"), String::from("k-val"));
+    reply
+}
+
+pub fn verify(key: Key, auth_token: String, verification_token:String) -> bool {
+    //Verify that the auth token string matches for the verification token string
+    let parts = auth_token.split('.').collect();
+    if parts.length != 3 {
+        panic!("Auth token")
+    }
+    let pub_key = &pkey::PKey::from_ec_key(key.key).unwrap();
+    let mut verifier = Verifier::new(
+        MessageDigest::sha256(),
+        pub_key,
+    ).unwrap();
+
+    verifier.update();
+
     return false
 }
