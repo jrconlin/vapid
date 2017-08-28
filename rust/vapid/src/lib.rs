@@ -12,24 +12,16 @@ use openssl::sign::{Signer, Verifier};
 use openssl::pkey;
 
 use std::collections::HashMap;
-use openssl::error::ErrorStack;
-use std::error::Error;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-    }
-}
-
-
-static SCHEMA: &str = "WebPush";
+// Preferred schema (in decending order)
+static SCHEMA: &str = "vapid";
 
 // Can this be killed/removed? Do I need it?
-#[allow(dead_code)]
 pub struct Key {
-    pub key: ec::EcKey ,
+    pub key: ec::EcKey
 }
+
+//TODO: Toss in a module?
 
 #[allow(dead_code)]
 impl Key {
@@ -59,14 +51,14 @@ impl Key {
         String::from_utf8(key.to_vec()).unwrap()
     }
 
-    // TODO: This may be wrong. Therea pears to be a set of derive funcs for PKeyCtx
-    fn derive_ec_public_point(bits:String) -> Key {
+    // TODO: This may be wrong. There appears to be a set of derive funcs for PKeyCtx
+    fn derive_ec_public_point(bits: String) -> Key {
         //Read a private key from a raw bit array
         let group = Key::group();
         let mut ctx = BigNumContext::new().unwrap();
         let mut new_key = ec::EcKeyBuilder::new().unwrap();
 
-        let bytes:Vec<u8>  = bits.into_bytes();
+        let bytes: Vec<u8> = bits.into_bytes();
         let secret = BigNum::from_slice(&bytes).unwrap();
         let mut point = ec::EcPoint::new(&group).unwrap();
         point.mul_generator(&group, &secret, &mut ctx).unwrap();
@@ -89,9 +81,9 @@ impl Key {
                                        &mut ctx).unwrap()).unwrap()
     }
 
-    fn from_public_raw(bits:String) -> Key {
+    fn from_public_raw(bits: String) -> Key {
         //Read a public key from a raw bit array
-        let bytes:Vec<u8> = bits.into_bytes();
+        let bytes: Vec<u8> = bits.into_bytes();
         let group = Key::group();
         let mut ctx = BigNumContext::new().unwrap();
         let point = ec::EcPoint::from_bytes(&group, &bytes, &mut ctx).unwrap();
@@ -100,13 +92,8 @@ impl Key {
             key: new_key,
         }
     }
-
 }
 
-pub fn generate_keys() -> Key {
-    //Generate the VAPID private key
-    Key::generate()
-}
 
 pub fn sign(key: Key, claims: &mut HashMap<String, serde_json::Value>) -> String {
     // convert the hash to a normalized JSON string
@@ -116,13 +103,20 @@ pub fn sign(key: Key, claims: &mut HashMap<String, serde_json::Value>) -> String
     if !claims.contains_key(&String::from("sub")) {
         panic!("No \"sub\" found in claims");
     }
+    if claims.get("sub").unwrap().as_str().unwrap().starts_with("mailto") == false {
+        panic!("\"sub\" not a valid html reference.")
+    }
+    let today = time::now_utc();
     claims.entry(String::from("exp"))
         .or_insert(serde_json::Value::from(
-            (time::now_utc() + time::Duration::hours(23)).to_timespec().sec));
-    let json:String = serde_json::to_string(&claims).unwrap();
+            (today + time::Duration::hours(23)).to_timespec().sec));
+    if claims.get("exp").unwrap().as_i64().unwrap() < today.to_timespec().sec {
+        panic!("\"exp\" already expired.")
+    }
+    let json: String = serde_json::to_string(&claims).unwrap();
     let content = format!("{}.{}",
-        base64::encode_config(&prefix, base64::URL_SAFE_NO_PAD),
-        base64::encode_config(&json, base64::URL_SAFE_NO_PAD)
+                          base64::encode_config(&prefix, base64::URL_SAFE_NO_PAD),
+                          base64::encode_config(&json, base64::URL_SAFE_NO_PAD)
     );
     let auth_k = base64::encode_config(
         unsafe {
@@ -130,7 +124,7 @@ pub fn sign(key: Key, claims: &mut HashMap<String, serde_json::Value>) -> String
                 &Key::group(),
                 ec::POINT_CONVERSION_COMPRESSED,
                 &mut ctx).unwrap())
-         },
+        },
         base64::URL_SAFE_NO_PAD,
     );
     let pub_key = &pkey::PKey::from_ec_key(key.key).unwrap();
@@ -145,44 +139,114 @@ pub fn sign(key: Key, claims: &mut HashMap<String, serde_json::Value>) -> String
     let auth_t = format!("{}.{}",
                          content.clone(),
                          base64::encode_config(
-                             unsafe{ &String::from_utf8_unchecked(signature) },
+                             unsafe { &String::from_utf8_unchecked(signature) },
                              base64::URL_SAFE_NO_PAD
                          ));
 
     format!("Authorization: {} t={},k={}", SCHEMA, auth_t, auth_k)
 }
 
-fn parse_auth_token(auth_token: &mut String) -> HashMap<String, String> {
-    let parts = auth_token.splitn(2,' ');
-    // Arrays, how do they work?
-    if parts[0] == "Authorization:" {
-        parts.pop()
-    }
-    if parts[0] != SCHEMA {
-        panic!(format!("Expected schema {} got {}", SCHEMA, parts[0]))
-    }
-    parts.pop();
-    // TODO: parse the remaining parts back into t & k values
-    let reply = HashMap::new();
-
-    reply.insert(String::from("t"), String::from("t-val"));
-    reply.insert(String::from("k"), String::from("k-val"));
-    reply
+struct AuthElements {
+    t: Vec<String>,
+    k: String,
 }
 
-pub fn verify(key: Key, auth_token: String, verification_token:String) -> bool {
-    //Verify that the auth token string matches for the verification token string
-    let parts = auth_token.split('.').collect();
-    if parts.length != 3 {
-        panic!("Auth token")
+fn parse_auth_token(auth_token: &mut String) -> AuthElements {
+    let mut parts: Vec<&str> = auth_token.splitn(2, " ").collect();
+    let mut schema = parts.remove(0).to_lowercase();
+    // Ignore the first token if it's the header line.
+    if schema == "authorization:" {
+        schema = parts.remove(0).to_lowercase();
     }
-    let pub_key = &pkey::PKey::from_ec_key(key.key).unwrap();
+    let mut reply: AuthElements = AuthElements { t: Vec::new(), k: String::from("") };
+    match parts[0].to_lowercase().as_ref() {
+        "vapid" => {
+            let sub_parts: Vec<&str> = parts[1].splitn(2, ",").collect();
+            for kvi in &sub_parts {
+                let kv:Vec<String> = kvi.splitn(2, "=").map(|x| String::from(x)).collect();
+                match kv[0].to_lowercase().as_ref() {
+                    "t" => {
+                        reply.t = kv[1].rsplit(".").map(|x| String::from(x)).collect();
+                    },
+                    "k" => { reply.k = String::from(kv[1].clone()) },
+                    _ => {}
+                }
+            }
+        },
+        "webpush" => {
+            reply.t = parts[1].split(".").map(|x| String::from(x)).collect();
+        }
+        _ => { panic!("Unknown schema type: {}", parts[0]) }
+    };
+    return reply
+}
+
+pub fn verify(auth_token: String, verification_token: String) -> bool {
+    //Verify that the auth token string matches for the verification token string
+    let auth_token = parse_auth_token(&mut String::from(auth_token.clone()));
+    let pub_ec_key = Key::from_public_raw(auth_token.k);
+    let pub_key = &pkey::PKey::from_ec_key(pub_ec_key.key).unwrap();
     let mut verifier = Verifier::new(
         MessageDigest::sha256(),
         pub_key,
     ).unwrap();
 
-    verifier.update();
+    verifier.update(&auth_token.t[0].clone().into_bytes());
 
-    return false
+    return verifier.finish(&auth_token.t[1].clone().into_bytes()).unwrap();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sign() {
+        let key = Key::generate();
+
+        let mut claims:HashMap<String, serde_json::Value> = HashMap::new();
+        claims.insert(String::from("sub"),
+                      serde_json::Value::from(String::from("mailto:mail@example.com")));
+        let result = sign(key, &mut claims);
+        assert!(result.starts_with("Authorization: "));
+        assert!(result.contains(" vapid "));
+
+        // tear apart the auth token for the happy bits
+        let token = result.split(" ").nth(2).unwrap();
+        let sub_parts: Vec<&str> = token.split(",").collect();
+        let mut auth_parts:HashMap<String, String> = HashMap::new();
+        for kvi in &sub_parts {
+            let kv: Vec<String> = kvi.splitn(2, "=").map(|x| String::from(x)).collect();
+            auth_parts.insert(kv[0].clone(), kv[1].clone());
+         }
+        assert!(auth_parts.contains_key("t"));
+        assert!(auth_parts.contains_key("k"));
+
+        // now tear apart the token
+        let token:Vec<&str> = auth_parts.get("t").unwrap().split(".").collect();
+        assert_eq!(token.len(), 3);
+
+        let content = String::from_utf8(
+            base64::decode_config(token[0], base64::URL_SAFE_NO_PAD).unwrap()
+        ).unwrap();
+        let items:HashMap<String, String> = serde_json::from_str(&content).unwrap();
+        assert!(items.contains_key("typ"));
+        assert!(items.contains_key("alg"));
+
+        let content:String = String::from_utf8(
+            base64::decode_config(token[1], base64::URL_SAFE_NO_PAD).unwrap()
+        ).unwrap();
+        let items:HashMap<String, serde_json::Value> = serde_json::from_str(&content).unwrap();
+
+        assert!(items.contains_key("exp"));
+        assert!(items.contains_key( "sub"));
+    }
+
+    // TODO: Test fail cases, verification, values, integration
+
+    #[test]
+    fn test_verify() {
+
+    }
+}
+
